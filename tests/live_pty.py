@@ -466,7 +466,7 @@ def main():
             (target / "den-help-test.ansi").write_bytes(output)
             key(b"\x1b", lambda: "Help · Esc to close" not in screen.text(), "close help without hiding automatic Details")
             assert_stacked()
-            for width, height in [(200, 50), (100, 32), (200, 50)]:
+            for width, height in [(200, 50), (100, 32), (200, 50), (120, 36)]:
                 screen = Screen(width, height)
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
                 process.send_signal(signal.SIGWINCH)

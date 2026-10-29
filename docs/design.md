@@ -49,8 +49,8 @@
   appears only for multiple batteries, diagnostics only on errors. Routine
   recording cadence and save-age are removed from Details; stale-recorder warnings
   are shown only in help and only when a live recorder is expected. Explanatory
-  prose belongs in README. Details also shows live firmware/CPU power settings;
-  compact panels prioritize Platform, Driver, EPP and Pstate over Governor.
+  prose belongs in the [user guide](guide.md). Details also shows live firmware/CPU
+  power settings; compact panels prioritize Platform, Driver, EPP and Pstate over Governor.
   Legacy Tab, +/-, and manual reload still work without
   UI advertising. Stale sensors/history-only mode remain explicit in the
   fixed-height footer. Preserve the terminal background.
@@ -324,5 +324,6 @@ selector direction hints and Up/Down selection while expanded are exercised,
 alongside sensor recovery, read-only behavior and terminal restoration.
 This is not a substitute for physically unplugging/replugging the target laptop.
 
-No system service is enabled by building/testing the project. A license must be
-chosen before publishing/distributing the project under an explicit license.
+No system service is enabled by building/testing the project. The project is
+licensed under [MIT](../LICENSE); publication checks are listed in
+[Development](development.md#publication-checklist).

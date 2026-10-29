@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 description = "A lightweight Linux battery recorder and terminal viewer"
+license = "MIT"
+repository = "https://github.com/yawarakatai/den"
+homepage = "https://github.com/yawarakatai/den"
+documentation = "https://github.com/yawarakatai/den/blob/main/docs/guide.md"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1"

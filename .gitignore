@@ -1,2 +1,5 @@
 /target
 .direnv/
+
+# Local battery history, recorder locks and SQLite sidecars.
+*.sqlite3*
