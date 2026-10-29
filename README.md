@@ -7,7 +7,8 @@ The UI, help and diagnostics are in English.
 ## Status
 
 An initial implementation: periodic recording, persistent history, battery and
-power graphs, and baseline time-to-empty / time-to-full estimates. Neural-network inference,
+power graphs, live power-setting details, and experimental time-to-empty / time-to-full
+scenario ranges. Neural-network inference,
 model training, notifications and power-management actions are not implemented.
 Den never changes charging thresholds or suspends the machine.
 
@@ -117,10 +118,13 @@ NixOS, a Home Manager module and a user-service unit are not provided yet.
 
 The initial window is **60 seconds**, with power and charge graphs shown together.
 A single sample has a visible endpoint; constant measurements still draw a line.
-Charge axes auto-scale (explicitly labeled); the summary gauge always represents
-0–100%. Small terminals show the focused graph only. An 80×24 terminal is
-recommended. There is no header row: the summary reads **Battery health / Power /
-ETA / Charge**, and `den` sits at the footer's right edge. The Power card uses
+Both graph axes auto-scale; the Charge summary gauge always represents 0–100%.
+Small terminals show the focused graph only. An 80×24 terminal is recommended.
+There is no header row: the summary reads **Power / Charge / ETA / Battery health**,
+and `den` sits at the footer's right edge. Every summary card has two content lines
+(four rows including borders). Charge puts its percentage and remaining Wh together
+above the gauge, saving one row across the normal-width summary. Narrow layouts
+use two rows of cards. The Power card uses
 two lines: **Discharging 7.3 W** (state accented, watts white), then
 **Battery · BAT0**. On tight layouts, long state names are abbreviated rather
 than clipping the numeric value. The time-window selector is on the Power graph's
@@ -135,8 +139,10 @@ hide the sidebar and use the full width for graphs. Expanding a graph uses the
 full chart area without the automatic sidebar. `d` overrides sidebar visibility;
 on narrow terminals it opens a Details overlay. The footer only advertises
 `←→ Window`, `↑↓ Graph`, `? Help` and `q Quit` (Graph is omitted when space is tight).
-Help is a small key table, with battery selection listed only when multiple
-batteries are available. Diagnostic details appear there only on errors; longer
+Details shows battery measurements and live platform/CPU power settings, without
+routine recording cadence or save-age information. Recorder problems remain available in help, not as a permanent
+Recording section. Help is a small key table, with battery selection listed only
+when multiple batteries are available. Diagnostic details appear there only on errors; longer
 measurement explanations stay in this README. Stale sensors and history-only
 mode remain visibly flagged in the footer without moving the charts.
 
@@ -196,6 +202,33 @@ snapshot cannot establish a measured interval. Very short panels show the
 observed amount and ask for more height to display hourly bars. Battery use is
 **not whole-PC consumption**: power supplied directly by AC is not included.
 
+### Power settings (live)
+
+Details reads these kernel controls every five seconds, without root, D-Bus or
+external commands:
+
+- **Platform:** firmware power mode from `firmware/acpi/platform_profile`.
+- **Driver:** CPU frequency driver (`scaling_driver`).
+- **EPP:** CPU energy/performance preference; `balance_performance` is displayed
+  as `balance perf.` and `balance_power` as `balance power`.
+- **Pstate:** Intel/AMD pstate mode (`active`, `passive`, etc.), when the CPU driver
+  identifies a supported pstate interface.
+- **Governor:** CPU frequency governor (shown when the panel has enough height).
+
+These are separate settings, not one interchangeable “profile.” In particular,
+Platform reports the firmware's actual control, **not** a claimed TLP or
+power-profiles-daemon selection. Den does not guess the controlling manager from
+AC state or a governor. CPU controls are checked across all `cpufreq/policy*`
+policies: differing known values show `Mixed`; incomplete, inaccessible or
+unsupported values show `N/A`, not a remembered previous value.
+
+This first version is **live display only**: settings are not stored in SQLite
+or used to condition predictions. History-only mode does not read current power
+settings and says they were not recorded. A custom `--sysfs` tree ending in
+`class/power_supply` uses the same tree's root for these controls; other fixture
+layouts leave them unavailable rather than reading the host's CPU settings.
+Nothing here changes system power settings or starts a power-management service.
+
 ### What watts mean
 
 **Battery flow is not total PC consumption or adapter input.** It measures energy
@@ -214,21 +247,26 @@ remains missing, not replaced by a calculated measurement. Wh alone cannot
 supply instantaneous current.
 
 The **Power** card and graph show unsigned watt magnitudes. Historical power
-segments use **green for charging** (energy entering the battery) and **orange for
-discharging** (energy leaving it); they retain their original state colors and do
+segments use **blue for charging** (energy entering the battery), **copper orange
+for discharging** (energy leaving it), and **green for Full**. They retain their
+original state colors and do
 not connect across state transitions. The card also names the state and
 measurement source; `Power` does not imply whole-PC consumption.
 
 The palette uses cool off-white primary values and titles, bright blue-gray
 secondary information and axis labels, blue-gray borders, and white footer keys.
 Muted colors are reserved for inactive or unavailable elements rather than all
-supporting information. Valid `0 W` and `Paused` remain readable, not dimmed as
-though unavailable. State colors are limited to indicators, the selected window,
-focus border, charge gauge and power traces. The current accent is green
-charging/full, a restrained copper orange discharging, and blue-gray paused/unknown.
-Charge history is off-white, with only its current endpoint accented. Staleness takes
-warning precedence; low-charge yellow/red overrides the charge value and gauge
-independently of normal state accents. The terminal's background is preserved.
+supporting information. Valid `0 W` and `Not charging` remain readable, not dimmed as
+though unavailable. Power and Charge traces/endpoints, the Charge gauge and UI
+accents use **state colors**: blue Charging (`#8FB5E8`), restrained copper orange
+Discharging (`#D18B47`), green Full (`#8BC592`), and blue-gray not-charging/unknown.
+The ETA's `Full` status is also green; ordinary W, %, health and time-range values
+stay white. There are no remaining-level color
+bands. Both histories retain the state at each measurement, break at state
+transitions and never repaint past history from the current reading. Hourly
+Battery use bars remain white. Staleness takes warning precedence in UI accents;
+the Charge number alone retains low-charge warnings (red below 15%, yellow below
+30%). The terminal's background is preserved.
 Missing values are `N/A`, not zero. Batteries with `Scope=Device` (for example,
 peripherals) are excluded.
 
@@ -238,14 +276,19 @@ bucket's extrema. A live read failure immediately marks data stale and disables
 ETA; recorded-only staleness uses three recording intervals or 90 seconds,
 whichever is greater.
 
-## Baseline prediction
+## Experimental prediction ranges
 
 The ETA card follows the battery state:
 
 - **Discharging:** `Time to empty` uses remaining energy / recent discharge power.
 - **Charging:** `Time to full` uses (reported full energy − current energy) /
   recent charging power. This targets the reported full capacity, not design capacity.
-- **Full / Not charging:** displays `Full` / `Paused`, without a countdown.
+- **Full / Not charging:** displays `Full` / `Not charging`, without a countdown.
+  These are driver-reported states, not inferred from the charge percentage.
+  A configured charge limit can normally stop charging below 100% while the
+  driver reports `Not charging` rather than `Full`. The same state can also occur
+  for other reasons, so den does not infer that the limit was reached. Charge
+  limits themselves are not currently collected.
 
 Power is exponentially smoothed (120-second time constant, up to ten minutes of
 continuous measurements in the same state). When power is unavailable, energy
@@ -254,13 +297,50 @@ three readings spanning 60 seconds are required; compatible saved history can
 supply the initial window. State changes, suspend and interrupted history reset
 warm-up. Stale sensors and unusable measurements do not produce an ETA.
 
-Both are estimates **assuming a similar future power rate**, not promises.
-Charging usually slows near full, so a constant-rate prediction can be optimistic;
-charge limits below full capacity are not modeled yet. Empty means reported zero
-energy, not a configurable OS shutdown threshold. Neither estimate includes a
-calibrated uncertainty interval. Charge-only batteries have approximate Wh
-conversions, marked with `~` in the UI; raw Ah values are also retained for later
-analysis.
+The card displays a **recent-use scenario range** in two complementary rows,
+with readable spacing when the width permits:
+
+```text
+In  15m – 40m
+At  21:23 – 21:48
+```
+
+**In** is the remaining-duration range in white/bold; **At** is the corresponding
+local 24-hour clock range in blue-gray. Both use the same outward-rounded bounds
+and the selected reading's timestamp, never a separate current clock or an old
+recording projected from the viewer's present time. At shows only clock times,
+without day suffixes; In provides the duration needed to interpret midnight or
+multi-day ranges. Labels and spaces may be omitted when needed, never the
+endpoints. A range spanning a UTC-offset change is explicitly shown in UTC to
+avoid ambiguous or reversed local clocks. If a complete clock range cannot be
+converted or safely fit, At shows `N/A` while In remains available. An open-ended
+In range produces an open-ended At range, not a fabricated upper time.
+
+Warm-up/unavailable readings keep their explanatory note instead of a clock
+range. Full stays green and Not charging stays white, without a countdown or projected
+time. The baseline smoothed rate remains the center scenario. Continuous
+measured watts are trapezoidally integrated into complete 60-second mean rates; the 10th/90th
+percentiles supply slow/fast scenarios. A minimum **±20% rate margin** around the
+baseline prevents constant readings from implying perfect certainty. The energy-
+trend fallback uses that margin alone. Remaining/unfilled energy divided by fast
+and slow rates gives the time range, rounded **outwards to five minutes**. Very
+long bounds use compact hours; a slow scenario exceeding seven days is left
+open-ended (`≥…`), not capped as a promised maximum.
+
+A one-row scenario histogram was trialled but removed: sparse floating blocks
+without labelled axes were ambiguous in this small card. ETA instead pairs the
+duration range with its projected clock range. A future distribution view would
+need more space and clear axes, not an unlabelled curve beside the estimate.
+
+**This is an uncalibrated heuristic, not an 80% confidence/probability interval.**
+The observed rate percentiles do not establish the coverage of future runtimes.
+Neither point accuracy nor interval coverage has been validated. It assumes
+roughly similar future use, and the user can change load at any time. Charging
+usually slows near full, so even the range may be optimistic; taper and charge
+limits below full capacity are not modeled. Empty means reported zero energy,
+not a configurable OS shutdown threshold. Charge-only batteries have approximate
+Wh conversions, marked with `~` in the UI; raw Ah values are retained for later
+analysis. Prediction results never replace raw measurements or run in the daemon.
 
 ## PCs without a battery
 
@@ -321,15 +401,20 @@ python3 tests/live_pty.py target/debug/den
 It drives the real executable in a pseudo-terminal, changes synthetic sysfs
 values through discharge → charging/0 W → charging/32.4 W, checks visible colored
 traces within seconds without a daemon, verifies unsigned power with preserved
-historical green/orange state colors and changing accents, and tests sensor-error
-recovery. It checks the two-line Power card, measured/derived/missing current,
-bright cool-white primary values (including idle/paused readings), blue-gray
+historical blue/copper/green state colors and changing accents, and tests sensor-error
+recovery. It checks state-colored Charge history/gauges, Power/Charge/ETA/health
+ordering, white In/secondary At ranges without ambiguous histogram blocks,
+non-UTC local-time conversion, matching duration/time bounds, green Full status,
+the absence of routine ETA subtitles, two-content-line summary cards,
+live power-setting refresh, absence of
+routine recording details, measured/derived/missing current,
+bright cool-white primary values (including idle/not-charging readings), blue-gray
 secondary text, compact contextual help, selector arrow hints, Up/Down graph
 selection while expanded, shared window controls, and terminal restoration.
 A second scenario seeds several hours of temporary discharge history, including
 missing and partially recorded hours, followed by compatible charging history.
 It checks the hourly Wh total, white bars, independent live-window controls,
-numeric full-charge ETA, details toggle/Esc handling, and automatic sidebar
+the full-charge scenario range, details toggle/Esc handling, and automatic sidebar
 visibility when resizing between 200×50 and 100×32. Left graphs must remain
 vertically stacked with matching widths, and both columns' panel borders align.
 It never changes physical power settings. Diagnostic output is saved under

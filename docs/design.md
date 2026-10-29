@@ -13,8 +13,11 @@
   persistent recording, 90-day retention, five-second saved-history checks.
   The live graph defaults to a 60-second window, not a multi-hour window that
   compresses a few new samples into the last column.
-- Headerless UI: four summary cards (health, power, ETA, charge), and branding at
-  the footer's right edge. The Power card has two content lines: accented state
+- Headerless UI: four summary cards (power, charge, ETA, health), each with two
+  content lines and four rows including borders. Charge combines percentage and
+  remaining Wh above its gauge; normal-width summaries save one row. Narrow
+  layouts use two rows of cards. Branding stays at the footer's right edge.
+  The Power card has two content lines: accented state
   beside white watts, followed by the battery source. Tight widths abbreviate the
   state rather than clip the value. The shared window selector has explicit left/
   right arrows (dimmed at unavailable ends) in the Power chart's top-right border,
@@ -28,18 +31,27 @@
   terminals hide the sidebar by default. `d` explicitly overrides visibility and
   uses a Details overlay on narrow terminals; expansion hides the automatic sidebar.
   The palette uses bright cool-white primary values, including valid zero and
-  paused readings, brighter blue-gray secondary information/axis labels, blue-gray
-  borders, and white footer keys instead of dimming all supporting text. Green
-  charging/full and restrained copper orange discharging accents are limited to
-  selection, focus, state labels, the gauge and historical power traces. Charge
-  history stays off-white; only its current endpoint takes the accent. Hourly
-  battery-use bars stay cool white independently of the live state. Past power
-  colors and low-charge warnings are independent of the current accent. The
+  not-charging readings, brighter blue-gray secondary information/axis labels, blue-gray
+  borders, and white footer keys instead of dimming all supporting text. Blue
+  Charging (#8FB5E8), copper orange Discharging (#D18B47) and green Full (#8BC592)
+  apply to selection, focus, state labels, both historical traces/endpoints and
+  the Charge gauge. The ETA's Full status is green; ordinary numeric values stay
+  white.
+  Remaining-level color bands are removed; only the Charge number retains low-level
+  warnings (red <15%, yellow <30%). Both histories break at state changes and
+  preserve original state colors instead of repainting the past. Both graphs
+  auto-scale without a redundant label on Charge. Hourly battery-use bars stay
+  cool white independently of the live state. Historical state colors and low-charge
+  warnings are independent of the current accent. The
   footer only advertises window, graph selection, help and quit, not every optional
   action. Up selects Power and Down selects Charge without wrapping, including in
   expanded mode. Normal help is a content-sized key table; battery selection
-  appears only for multiple batteries, diagnostics only on errors. Explanatory
-  prose belongs in README. Legacy Tab, +/-, and manual reload still work without
+  appears only for multiple batteries, diagnostics only on errors. Routine
+  recording cadence and save-age are removed from Details; stale-recorder warnings
+  are shown only in help and only when a live recorder is expected. Explanatory
+  prose belongs in README. Details also shows live firmware/CPU power settings;
+  compact panels prioritize Platform, Driver, EPP and Pstate over Governor.
+  Legacy Tab, +/-, and manual reload still work without
   UI advertising. Stale sensors/history-only mode remain explicit in the
   fixed-height footer. Preserve the terminal background.
 - No async runtime, network listener, D-Bus dependency or external command per
@@ -53,7 +65,9 @@ handles transactional frames, schema versions, retention and read-only access.
 maintains a bounded ten-minute per-battery series, reads optional saved history,
 and merges the two sources without duplicates. `usage.rs` integrates recorded
 battery outflow into hourly buckets, independently of the live series and selected
-graph window. `predict.rs` consumes measured history. `tui.rs` handles presentation,
+graph window. `power.rs` reads live platform/CPU controls on a separate five-second
+cadence; these are not persisted or predictor inputs yet. `predict.rs` consumes
+measured battery history. `tui.rs` handles presentation,
 colors, graphs and interaction.
 
 ```text
@@ -109,6 +123,24 @@ unusable. It never mutates BatteryReading, SQLite or the predictor inputs; raw
 missing current remains missing. Stored energy in Wh alone does not determine
 instantaneous current.
 
+## Live power settings
+
+Read firmware `platform_profile`, each CPU policy's driver/governor/EPP, and the
+matching Intel/AMD pstate status without external commands, D-Bus, privilege
+changes or writes. Cache for five seconds independently of database availability.
+A refresh replaces missing/error values with unknown, not a stale prior setting.
+Across policies, different known values are `Mixed`; any unavailable policy value
+makes that field unknown. Do not infer a power-management provider or TLP/PPD
+selection from AC state, governor or firmware profile. Keep platform, driver,
+pstate mode, governor and EPP distinct.
+
+Only standard .../class/power_supply paths imply a matching system sysfs root;
+other custom fixture layouts must never fall through to the host's CPU settings.
+History-only mode skips power-setting collection and labels it unrecorded. These
+are live details only: preserving system context for historical prediction needs
+a separate, explicit schema evolution with provenance/policy identity. Do not
+attach the viewer's current system settings to older battery recordings.
+
 ## Hourly battery use
 
 The sidebar compares outgoing battery energy, not screen-on time or whole-PC use.
@@ -121,7 +153,7 @@ Only saved frames participate: the volatile live series must not double-count
 recordings or make long-term totals depend on how long the viewer was open.
 Trapezoidal integration of measured watts uses boottime elapsed duration, dividing
 intervals proportionally at UTC wall-hour boundaries. Each pair must be continuous
-and have the same known battery state. Charging/full/paused pairs contribute zero
+and have the same known battery state. Charging/full/not-charging pairs contribute zero
 outgoing energy; they never subtract from discharge. Discharging pairs require
 finite nonnegative powers at both ends. Missing rates do not use energy-counter
 fallback or forward-filled power. Missing-battery frames are preserved by a LEFT
@@ -197,17 +229,46 @@ or shutdown actions.
    assumes a constant future rate, so taper can make it optimistic; charge limits
    below full capacity are not modeled. Never display a discharge countdown while
    charging or treat design capacity as the target full capacity.
-2. Collect representative histories, inspect quantization/missing data and build
+2. Trial a recent-use scenario band without claiming calibrated probability:
+   integrate measured watts into complete time-weighted 60-second means, use
+   their 10th/90th percentiles, and widen to at least ±20% of the baseline rate.
+   Divide the energy target by fast/slow rates; round time bounds outwards to five
+   minutes. ETA pairs white/bold In (duration) with blue-gray At (projected clock
+   times). Derive both from the same displayed bounds and selected snapshot's
+   timestamp, including history-only mode; never add a historical duration to the
+   viewer's current time. Coarser hour bounds on tight layouts must also govern
+   At. Use local 24-hour clocks without day suffixes: In already conveys the
+   elapsed duration, including midnight and multi-day ranges. Omit labels/spaces
+   before dropping any values; an unrepresentable clock range is N/A, not clipped.
+   UTC-offset transitions use explicitly labelled UTC times instead of ambiguous
+   local intervals. Use libc's reentrant localtime/gmtime interfaces, without
+   subprocesses or a timezone database dependency; libc was already transitive
+   and is now a direct dependency for these necessary Linux interfaces. In/At
+   calculation lives in eta.rs; neither daemon nor raw storage changes. Existing
+   warm-up/unavailability notes remain, Full stays green and Not charging stays
+   white without projected times. Do not alias Not charging as Paused: a normal
+   charge-limit stop is not necessarily a user pause. Neither Full nor reaching a
+   charge limit can be inferred from this state alone; limits are not collected. A one-row empirical histogram
+   was trialled and removed because sparse floating blocks without axes were not
+   self-explanatory. Do not restore a miniature distribution or fabricate a normal
+   curve from the endpoints; a useful distribution view needs more room and clear
+   axes. Removing the diagram does not change the numerical range algorithm.
+   Energy-trend fallback uses the rate margin alone. Slow scenarios over
+   seven days remain open-ended. This heuristic is implemented, not validated;
+   charging taper, future load changes and charge limits remain outside the model.
+3. Collect representative histories, inspect quantization/missing data and build
    an offline evaluation dataset. Add export tooling only when its format is
    actually needed.
-3. Compare simple statistical/regression approaches with the baseline.
-4. Consider an optional local NN runtime and a separately distributed model only
+4. Compare simple statistical/regression approaches with the baseline and evaluate
+   interval coverage before making probability claims. Point-accuracy work is deferred.
+5. Consider an optional local NN runtime and a separately distributed model only
    if evaluation demonstrates an improvement. Keep the ordinary package free of
    mandatory ML dependencies and keep a baseline fallback.
 
 Potential features include recent power trends, battery capacity/health,
-operating state and time of day. CPU load, brightness and power profiles are not
-collected yet: add them only with a clear benefit and privacy/resource review.
+operating state and time of day. Power settings are live display only, not saved
+features. CPU load and brightness are not collected: add them only with a clear
+benefit and privacy/resource review.
 
 Do not train using past predictions as ground truth. A discharge ending in
 charging, shutdown or missing recording does not reveal its true time-to-empty;
@@ -217,8 +278,9 @@ wall time) before training or publishing accuracy claims.
 
 Evaluation must split chronologically and by discharge session to avoid leakage.
 Compare error in minutes and behavior under changing load with the baseline.
-Display uncertainty bounds only after checking their coverage. Neither a model
-nor a system service can know future user workload with certainty.
+Do not label the trial scenario band a confidence/probability interval until
+empirical coverage has been checked. Neither a model nor a system service can
+know future user workload with certainty.
 
 ## Validation requiring a real deployment
 
@@ -247,8 +309,16 @@ narrow ones until visibility is explicitly overridden. Both columns' borders mus
 align. Several hours of seeded saved data verify the integrated discharge total,
 white bars, gap markers and independence from the live graphs' selected window. Help/Esc must not accidentally hide the automatic sidebar;
 Esc closes manually opened Details rather than quitting. Primary and supporting
-text retain their cool-white/blue-gray contrast even for idle readings; past power
-traces keep green/orange state colors. The two-line Power card, finite W/V current
+text retain their cool-white/blue-gray contrast even for idle readings. Charge
+history and the summary gauge follow charging/discharging state, not remaining
+level. Tests cover historical state transitions, invalid/missing levels, no past
+repainting, two-line cards, live power-setting refresh, heuristic ETA ranges,
+white duration ranges paired with secondary local clock ranges, and green Full
+status. UTC-controlled unit tests cover shared bounds/reference time, midnight,
+year/leap-day transitions, UTC-offset changes, overflow, open ranges and narrow
+layouts; the real PTY runs in a fixed non-UTC zone to check local conversion. The compact ETA card must not contain
+ambiguous histogram blocks.
+The two-line Power card, finite W/V current
 fallback, measured-current precedence, missing-voltage handling, compact help,
 selector direction hints and Up/Down selection while expanded are exercised,
 alongside sensor recovery, read-only behavior and terminal restoration.

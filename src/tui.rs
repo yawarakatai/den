@@ -21,6 +21,7 @@ use ratatui::{
 };
 
 use crate::{
+    eta,
     model::{BatteryReading, Sample},
     monitor::{LIVE_INTERVAL, Monitor},
     predict::{Estimate, format_duration},
@@ -33,6 +34,7 @@ const TEXT: Color = Color::Rgb(220, 228, 240);
 const SECONDARY: Color = Color::Rgb(186, 198, 216);
 const MUTED: Color = Color::Rgb(135, 147, 170);
 const BORDER: Color = Color::Rgb(73, 86, 113);
+const BLUE: Color = Color::Rgb(143, 181, 232);
 const GREEN: Color = Color::Rgb(139, 197, 146);
 const ORANGE: Color = Color::Rgb(209, 139, 71);
 const YELLOW: Color = Color::Rgb(238, 199, 113);
@@ -173,14 +175,14 @@ fn draw(frame: &mut Frame<'_>, monitor: &Monitor, view: &View, path: &Path) {
     }
     let compact = area.width < 72;
     let rows = Layout::vertical([
-        Constraint::Length(if compact { 8 } else { 5 }),
+        Constraint::Length(if compact { 8 } else { 4 }),
         Constraint::Min(5),
         Constraint::Length(1),
     ])
     .spacing(1)
     .split(area);
     let cards = metric_areas(rows[0], compact);
-    draw_metrics(frame, monitor, &cards, compact);
+    draw_metrics(frame, monitor, &cards);
     let sidebar =
         sidebar_available(area.width, area.height, view.expanded) && view.details.unwrap_or(true);
     if view.expanded || rows[1].height < 12 {
@@ -401,7 +403,7 @@ fn range_selector(view: &View, color: Color, available: usize) -> Line<'static> 
 
 fn status_color(status: &str) -> Color {
     match status {
-        "Charging" => GREEN,
+        "Charging" => BLUE,
         "Discharging" => ORANGE,
         "Full" => GREEN,
         "Not charging" => SECONDARY,
@@ -457,45 +459,56 @@ fn metric_areas(area: Rect, compact: bool) -> Vec<Rect> {
     cards
 }
 
-fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect], compact: bool) {
+fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect]) {
     let reading = monitor.reading();
     let color = accent(monitor);
-    let charge = reading.and_then(|reading| reading.capacity_percent);
+    let charge = reading
+        .and_then(|r| r.capacity_percent)
+        .filter(|p| p.is_finite() && (0.0..=100.0).contains(p));
     let warning = match charge {
         Some(value) if value < 15.0 => Some(RED),
         Some(value) if value < 30.0 => Some(YELLOW),
         _ => None,
     };
-    let energy = reading.and_then(|reading| reading.energy_now_wh);
-    metric(
-        frame,
-        cards[3],
-        "Charge",
-        number(charge, "%"),
-        format!(
-            "{}{}",
-            if reading.is_some_and(|r| r.energy_estimated) {
-                "~"
-            } else {
-                ""
-            },
-            number(energy, "Wh remaining")
-        ),
-        warning.unwrap_or(TEXT),
+    let energy = reading.and_then(|r| r.energy_now_wh);
+    let energy_text = format!(
+        "{}{}",
+        if reading.is_some_and(|r| r.energy_estimated) {
+            "~"
+        } else {
+            ""
+        },
+        number(energy, "Wh")
     );
-    if !compact && let Some(charge) = charge {
-        let gauge = Rect::new(
-            cards[3].x + 1,
-            cards[3].y + 3,
-            cards[3].width.saturating_sub(2),
-            1,
-        );
+    let mut percent = charge.map_or_else(|| "N/A".into(), |p| format!("{p:.1}%"));
+    if percent.len() + 3 + energy_text.len() > cards[1].width.saturating_sub(2) as usize {
+        percent = charge.map_or_else(|| "N/A".into(), |p| format!("{p:.0}%"));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                percent,
+                Style::default()
+                    .fg(warning.unwrap_or(TEXT))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" · {energy_text}"), Style::default().fg(SECONDARY)),
+        ]))
+        .block(panel(" Charge ", BORDER)),
+        cards[1],
+    );
+    if let Some(charge) = charge {
         frame.render_widget(
             Gauge::default()
                 .ratio((charge / 100.0).clamp(0.0, 1.0))
                 .label("")
-                .gauge_style(Style::default().fg(warning.unwrap_or(color)).bg(BORDER)),
-            gauge,
+                .gauge_style(Style::default().fg(color).bg(BORDER)),
+            Rect::new(
+                cards[1].x + 1,
+                cards[1].y + 2,
+                cards[1].width.saturating_sub(2),
+                1,
+            ),
         );
     }
     let source = reading.map_or_else(
@@ -504,11 +517,11 @@ fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect], compac
     );
     let power = number(reading.and_then(|r| r.power_w), "W");
     let status = reading.map_or("No battery", |r| r.status.as_str());
-    let status = if status.len() + 1 + power.len() > cards[1].width.saturating_sub(2) as usize {
+    let status = if status.len() + 1 + power.len() > cards[0].width.saturating_sub(2) as usize {
         match status {
             "Discharging" => "Disch.",
             "Charging" => "Charg.",
-            "Not charging" => "Paused",
+            "Not charging" => "No chg",
             other => other,
         }
     } else {
@@ -527,16 +540,25 @@ fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect], compac
             Line::styled(source, Style::default().fg(SECONDARY)),
         ])
         .block(panel(" Power ", BORDER)),
-        cards[1],
+        cards[0],
     );
     let estimate = monitor.estimate();
-    let (eta, note) = eta_text(monitor, estimate.as_ref());
+    let (eta, note) = eta_text(
+        monitor,
+        estimate.as_ref(),
+        cards[2].width.saturating_sub(2) as usize,
+    );
     let charging = reading.is_some_and(|reading| {
         matches!(
             reading.status.as_str(),
             "Charging" | "Full" | "Not charging"
         )
     });
+    let eta_color = if reading.is_some_and(|r| r.status == "Full") && !monitor.source_stale() {
+        GREEN
+    } else {
+        TEXT
+    };
     metric(
         frame,
         cards[2],
@@ -547,7 +569,7 @@ fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect], compac
         },
         eta,
         note,
-        TEXT,
+        eta_color,
     );
     let health = reading
         .and_then(|reading| reading.energy_full_wh.zip(reading.energy_design_wh))
@@ -555,7 +577,7 @@ fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect], compac
         .map(|(full, design)| full / design * 100.0);
     metric(
         frame,
-        cards[0],
+        cards[3],
         "Battery health",
         number(health, "%"),
         format!(
@@ -566,7 +588,7 @@ fn draw_metrics(frame: &mut Frame<'_>, monitor: &Monitor, cards: &[Rect], compac
     );
 }
 
-fn eta_text(monitor: &Monitor, estimate: Option<&Estimate>) -> (String, String) {
+fn eta_text(monitor: &Monitor, estimate: Option<&Estimate>, available: usize) -> (String, String) {
     if monitor.source_stale() {
         return ("N/A".into(), "Stale reading".into());
     }
@@ -575,13 +597,10 @@ fn eta_text(monitor: &Monitor, estimate: Option<&Estimate>) -> (String, String) 
     };
     match reading.status.as_str() {
         "Full" => ("Full".into(), String::new()),
-        "Not charging" => ("Paused".into(), String::new()),
+        "Not charging" => ("Not charging".into(), String::new()),
         "Charging" | "Discharging" => {
-            if let Some(estimate) = estimate {
-                return (
-                    format!("~{}", format_duration(estimate.seconds)),
-                    "At current rate".into(),
-                );
+            if let (Some(estimate), Some(snapshot)) = (estimate, monitor.snapshot()) {
+                return eta::format(estimate, snapshot.time.timestamp, available);
             }
             if reading.energy_now_wh.is_none() {
                 ("N/A".into(), "Energy unavailable".into())
@@ -600,7 +619,7 @@ fn eta_text(monitor: &Monitor, estimate: Option<&Estimate>) -> (String, String) 
 fn draw_details_popup(frame: &mut Frame<'_>, monitor: &Monitor) {
     let screen = frame.area();
     let width = screen.width.saturating_sub(4).min(40);
-    let height = 10;
+    let height = 11;
     let area = Rect::new(
         screen.right() - width - 2,
         screen.y + (screen.height - height) / 2,
@@ -637,35 +656,37 @@ fn draw_details(frame: &mut Frame<'_>, monitor: &Monitor, area: Rect, popup: boo
             ),
         ]));
     }
-    info.extend([
-        Line::from(""),
-        Line::styled(
-            " Recording",
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ),
-        Line::styled(
-            format!(" {}", recording_label(monitor)),
-            Style::default().fg(
-                if monitor.history_error.is_some()
-                    || monitor
-                        .recorded
-                        .as_ref()
-                        .is_some_and(|s| s.is_stale(monitor.now))
-                {
-                    YELLOW
-                } else {
-                    SECONDARY
-                },
-            ),
-        ),
-    ]);
-    if let Some(snapshot) = &monitor.recorded {
-        let age = monitor.now - snapshot.time.timestamp;
-        info.push(Line::from(if age >= 0 {
-            format!(" Last saved {age}s ago")
-        } else {
-            " Save timestamp is ahead".into()
-        }));
+    if area.height >= 11 {
+        info.push(Line::from(""));
+    }
+    if !monitor.live_enabled {
+        info.push(Line::styled(
+            " Power settings not saved",
+            Style::default().fg(MUTED),
+        ));
+    } else {
+        let settings = &monitor.power_settings;
+        for (label, value) in [
+            ("Platform", &settings.platform),
+            ("Driver", &settings.driver),
+            ("EPP", &settings.epp),
+            ("Pstate", &settings.pstate),
+            ("Governor", &settings.governor),
+        ] {
+            let display = match value.as_deref().unwrap_or("N/A") {
+                "balance_performance" => "balance perf.",
+                "balance_power" => "balance power",
+                "balanced-performance" => "balanced perf.",
+                other => other,
+            };
+            info.push(Line::from(vec![
+                Span::styled(format!(" {label:<9}"), Style::default().fg(SECONDARY)),
+                Span::styled(
+                    display,
+                    Style::default().fg(if value.is_some() { TEXT } else { MUTED }),
+                ),
+            ]));
+        }
     }
     frame.render_widget(
         Paragraph::new(info).wrap(Wrap { trim: false }).block(panel(
@@ -680,17 +701,17 @@ fn draw_details(frame: &mut Frame<'_>, monitor: &Monitor, area: Rect, popup: boo
     );
 }
 
-fn recording_label(monitor: &Monitor) -> String {
-    if monitor.history_error.is_some() {
-        "History unavailable".into()
-    } else if let Some(snapshot) = &monitor.recorded {
-        if snapshot.is_stale(monitor.now) {
-            "Recorder stale".into()
-        } else {
-            format!("Every {}s", snapshot.interval_secs)
-        }
+fn recorder_warning(monitor: &Monitor) -> Option<&'static str> {
+    if !monitor.live_enabled {
+        return None;
+    }
+    let snapshot = monitor.recorded.as_ref()?;
+    if snapshot.time.timestamp > monitor.now {
+        Some("Save timestamp is ahead")
+    } else if snapshot.is_stale(monitor.now) {
+        Some("Recorder stale")
     } else {
-        "No saved measurements".into()
+        None
     }
 }
 
@@ -772,13 +793,15 @@ fn graph_segments<'a>(
             Graph::Power => sample.reading.power_w,
             Graph::Charge => sample.reading.capacity_percent,
         }
-        .filter(|value| value.is_finite() && *value >= 0.0);
+        .filter(|value| {
+            value.is_finite() && *value >= 0.0 && (graph != Graph::Charge || *value <= 100.0)
+        });
         let in_range = (end - range..=end).contains(&sample.time.timestamp);
         let contiguous = previous.is_none_or(|previous| {
             sample.time.follows(
                 &previous.time,
                 sample.interval_secs.max(previous.interval_secs),
-            ) && (graph != Graph::Power || previous.reading.status == sample.reading.status)
+            ) && previous.reading.status == sample.reading.status
         });
         if (!contiguous || value.is_none() || !in_range) && !current.is_empty() {
             segments.push(Segment {
@@ -789,11 +812,7 @@ fn graph_segments<'a>(
         }
         if let Some(value) = value.filter(|_| in_range) {
             current.push(((sample.time.timestamp - end) as f64, value));
-            color = if graph == Graph::Charge {
-                TEXT
-            } else {
-                status_color(&sample.reading.status)
-            };
+            color = status_color(&sample.reading.status);
         }
         previous = Some(sample);
     }
@@ -824,7 +843,7 @@ fn draw_chart(
     );
     let (minimum, maximum, step) = bounds(&segments, graph);
     let mut datasets = Vec::new();
-    for (index, segment) in segments.iter().enumerate() {
+    for segment in &segments {
         let color = segment.color;
         datasets.push(
             Dataset::default()
@@ -836,27 +855,18 @@ fn draw_chart(
         // A single sample and the current endpoint must be visible, not a nearly
         // invisible subpixel at the edge of a many-hour window.
         if let Some(last) = segment.points.last() {
-            let endpoint = if graph == Graph::Charge
-                && index + 1 == segments.len()
-                && last.0 == 0.0
-                && !monitor.source_stale()
-            {
-                accent(monitor)
-            } else {
-                color
-            };
             datasets.push(
                 Dataset::default()
                     .data(std::slice::from_ref(last))
                     .marker(Marker::Dot)
                     .graph_type(GraphType::Scatter)
-                    .style(Style::default().fg(endpoint)),
+                    .style(Style::default().fg(color)),
             );
         }
     }
     let title = match graph {
         Graph::Power => " Power · W ",
-        Graph::Charge => " Charge · % (auto scale) ",
+        Graph::Charge => " Charge · % ",
     };
     let color = accent(monitor);
     let mut block = panel(title, if graph == view.focus { color } else { BORDER });
@@ -1023,7 +1033,9 @@ fn draw_help(frame: &mut Frame<'_>, monitor: &Monitor, view: &View, path: &Path)
         })
         .collect::<Vec<_>>();
     let has_history_error = monitor.history_error.is_some() || monitor.usage_error.is_some();
-    let has_errors = monitor.live_error.is_some() || has_history_error;
+    let recording_warning = recorder_warning(monitor);
+    let has_errors =
+        monitor.live_error.is_some() || has_history_error || recording_warning.is_some();
     if has_errors {
         text.push(Line::from(""));
         if has_history_error {
@@ -1034,7 +1046,11 @@ fn draw_help(frame: &mut Frame<'_>, monitor: &Monitor, view: &View, path: &Path)
         }
         if let Some(estimate) = monitor.estimate() {
             text.push(Line::styled(
-                format!("Prediction: {}", estimate.method),
+                format!(
+                    "Prediction: {} (~{})",
+                    estimate.method,
+                    format_duration(estimate.seconds)
+                ),
                 Style::default().fg(SECONDARY),
             ));
         }
@@ -1043,6 +1059,9 @@ fn draw_help(frame: &mut Frame<'_>, monitor: &Monitor, view: &View, path: &Path)
         }
         if let Some(error) = &monitor.history_error {
             text.push(Line::styled(error.clone(), Style::default().fg(YELLOW)));
+        }
+        if let Some(warning) = recording_warning {
+            text.push(Line::styled(warning, Style::default().fg(YELLOW)));
         }
         if let Some(error) = &monitor.usage_error
             && monitor.history_error.as_ref() != Some(error)
@@ -1261,13 +1280,13 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &monitor, &view, Path::new("missing.db")))
             .unwrap();
-        assert!(text(&terminal).contains("~2h 30m"));
+        assert!(text(&terminal).contains("2h 05m – 3h 10m"));
         monitor.now += 10;
         terminal
             .draw(|frame| draw(frame, &monitor, &view, Path::new("missing.db")))
             .unwrap();
         assert!(text(&terminal).contains("SENSOR STALE"));
-        assert!(!text(&terminal).contains("~2h 30m"));
+        assert!(!text(&terminal).contains("2h 05m – 3h 10m"));
         view.help = true;
         terminal
             .draw(|frame| draw(frame, &monitor, &view, Path::new("missing.db")))
@@ -1308,8 +1327,9 @@ mod tests {
         assert!(screen.contains("Battery · BAT0"));
         assert!(!screen.contains("Battery power"));
         assert!(screen.contains("Time to full"));
-        assert!(screen.contains("~1h 15m"));
-        assert!(screen.contains("At current rate"));
+        assert!(screen.contains("1h 00m – 1h 35m"));
+        assert!(!screen.contains("Recent charge"));
+        assert!(!screen.contains("Recent use"));
         assert!(!screen.contains("Time to empty"));
         assert!(!screen.contains("Not discharging"));
         assert!(!screen.contains("LIVE 1s"));
@@ -1320,10 +1340,10 @@ mod tests {
         assert!(
             segments
                 .iter()
-                .all(|s| s.color == GREEN && s.points.iter().all(|(_, w)| *w > 0.0))
+                .all(|s| s.color == BLUE && s.points.iter().all(|(_, w)| *w > 0.0))
         );
         assert!(terminal.backend().buffer().content.iter().any(|cell| {
-            cell.fg == GREEN
+            cell.fg == BLUE
                 && cell
                     .symbol()
                     .chars()
@@ -1356,12 +1376,12 @@ mod tests {
             } else {
                 width - 1
             };
-            for y in [6, charge_y] {
+            for y in [5, charge_y] {
                 assert_eq!(buffer[(0, y)].symbol(), "╭");
                 assert_eq!(buffer[(right, y)].symbol(), "╮");
             }
             if width >= 120 {
-                assert_eq!(buffer[(cards[3].x, 6)].symbol(), "╭");
+                assert_eq!(buffer[(cards[3].x, 5)].symbol(), "╭");
                 assert_eq!(buffer[(cards[3].x, charge_y - 2)].symbol(), "╰");
                 assert_eq!(buffer[(cards[3].x, charge_y)].symbol(), "╭");
                 assert_eq!(buffer[(cards[3].x, 37)].symbol(), "╰");
@@ -1377,7 +1397,7 @@ mod tests {
                 assert!(!text(&terminal).contains("Battery use · Wh"));
             }
             let power = (0..width)
-                .map(|x| buffer[(x, 6)].symbol())
+                .map(|x| buffer[(x, 5)].symbol())
                 .collect::<String>();
             let charge = (0..width)
                 .map(|x| buffer[(x, charge_y)].symbol())
@@ -1388,29 +1408,174 @@ mod tests {
             let top = (0..width)
                 .map(|x| buffer[(x, 0)].symbol())
                 .collect::<String>();
-            assert!(top.find("Battery health").unwrap() < top.find("Power").unwrap());
-            assert!(top.find("Time to empty").unwrap() < top.rfind("Charge").unwrap());
+            assert!(top.find("Power").unwrap() < top.find("Charge").unwrap());
+            assert!(top.find("Charge").unwrap() < top.find("Time to empty").unwrap());
+            assert!(top.find("Time to empty").unwrap() < top.find("Battery health").unwrap());
             assert_eq!(buffer[(width - 3, 39)].symbol(), "d");
         }
     }
 
     #[test]
-    fn charging_eta_distinguishes_warmup_missing_capacity_pause_and_full() {
+    fn eta_pairs_a_white_duration_with_a_secondary_clock_range_and_full_stays_green() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
+        for (status, start) in [("Charging", 0), ("Discharging", 301)] {
+            for second in start..=start + 300 {
+                let mut current = reading(20.0);
+                current.status = status.into();
+                monitor.remember_live(test_time(second), vec![current]);
+            }
+            for width in [48, 72, 100, 140] {
+                let compact = width < 72;
+                let card =
+                    metric_areas(Rect::new(0, 0, width, if compact { 8 } else { 4 }), compact)[2];
+                let mut terminal = Terminal::new(TestBackend::new(width, 32)).unwrap();
+                terminal
+                    .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let row = |y| {
+                    (card.x + 1..card.right() - 1)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                };
+                assert!(row(card.y + 1).contains('–'));
+                assert!(row(card.y + 2).contains(':'));
+                let clock_start = (card.x + 1..card.right() - 1)
+                    .find(|x| buffer[(*x, card.y + 2)].symbol() != " ")
+                    .unwrap();
+                assert_eq!(buffer[(clock_start, card.y + 2)].fg, SECONDARY);
+                assert!(
+                    (card.x + 1..card.right() - 1)
+                        .all(|x| !blocks_contain(buffer[(x, card.y + 1)].symbol()))
+                );
+                let value = &buffer[(card.x + 1, card.y + 1)];
+                assert_eq!(value.fg, TEXT);
+                assert!(value.modifier.contains(Modifier::BOLD));
+                assert!(
+                    value.symbol() == "I" || value.symbol().chars().all(|c| c.is_ascii_digit())
+                );
+            }
+        }
+        let mut full = reading(0.0);
+        full.status = "Full".into();
+        full.capacity_percent = Some(100.0);
+        full.energy_now_wh = full.energy_full_wh;
+        monitor.remember_live(test_time(602), vec![full]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        let card = metric_areas(Rect::new(0, 0, 100, 4), false)[2];
+        terminal
+            .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(card.x + 1, 1)].symbol(), "F");
+        assert_eq!(terminal.backend().buffer()[(card.x + 1, 1)].fg, GREEN);
+        monitor.now += 10;
+        terminal
+            .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
+            .unwrap();
+        assert_eq!(terminal.backend().buffer()[(card.x + 1, 1)].symbol(), "N");
+        assert_eq!(terminal.backend().buffer()[(card.x + 1, 1)].fg, TEXT);
+        assert!(text(&terminal).contains("Stale reading"));
+    }
+
+    #[test]
+    fn available_eta_uses_the_reading_time_not_the_viewers_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
+        for (status, start) in [("Charging", 39), ("Discharging", 159)] {
+            for second in start..=start + 60 {
+                let mut current = reading(20.0);
+                current.status = status.into();
+                monitor.remember_live(test_time(second), vec![current]);
+            }
+            let estimate = monitor.estimate().unwrap();
+            let base = monitor.snapshot().unwrap().time.timestamp;
+            monitor.now = base + 2;
+            let (range, arrival) = eta_text(&monitor, Some(&estimate), 48);
+            assert!(range.starts_with("In  ") && range.contains('–'));
+            assert!(arrival.starts_with("At  ") && arrival.contains(':'));
+            let expected = eta::format(&estimate, base, 48);
+            assert_eq!((range, arrival), expected);
+            assert_ne!(expected.1, eta::format(&estimate, monitor.now, 48).1);
+            monitor.recorded = monitor.snapshot().cloned();
+            monitor.live_enabled = false;
+            assert_eq!(eta_text(&monitor, Some(&estimate), 48), expected);
+            monitor.live_enabled = true;
+        }
+    }
+
+    #[test]
+    fn charging_eta_distinguishes_warmup_missing_capacity_not_charging_and_full() {
         let dir = tempfile::tempdir().unwrap();
         let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
         let mut charging = reading(20.0);
         charging.status = "Charging".into();
         monitor.remember_live(test_time(0), vec![charging.clone()]);
-        assert_eq!(eta_text(&monitor, None).0, "Estimating...");
+        assert_eq!(eta_text(&monitor, None, 30).0, "Estimating...");
         charging.energy_full_wh = None;
         monitor.remember_live(test_time(1), vec![charging.clone()]);
-        assert_eq!(eta_text(&monitor, None).1, "Full size unknown");
+        assert_eq!(eta_text(&monitor, None, 30).1, "Full size unknown");
         charging.status = "Not charging".into();
         monitor.remember_live(test_time(2), vec![charging.clone()]);
-        assert_eq!(eta_text(&monitor, None).0, "Paused");
+        assert_eq!(eta_text(&monitor, None, 30).0, "Not charging");
         charging.status = "Full".into();
         monitor.remember_live(test_time(3), vec![charging]);
-        assert_eq!(eta_text(&monitor, None).0, "Full");
+        assert_eq!(eta_text(&monitor, None, 30).0, "Full");
+    }
+
+    #[test]
+    fn not_charging_never_implies_a_pause_or_full_regardless_of_charge_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
+        let previous_estimate = Estimate {
+            seconds: 1_800,
+            lower_seconds: 1_200,
+            upper_seconds: Some(2_400),
+            method: "smoothed power",
+        };
+        for (second, percent) in [60.0, 80.0, 100.0].into_iter().enumerate() {
+            let mut stopped = reading(0.0);
+            stopped.status = "Not charging".into();
+            stopped.external_power = Some(true);
+            stopped.capacity_percent = Some(percent);
+            stopped.energy_full_wh = Some(50.0);
+            stopped.energy_now_wh = Some(percent / 100.0 * 50.0);
+            monitor.remember_live(test_time(second as i64), vec![stopped]);
+            assert_eq!(
+                eta_text(&monitor, Some(&previous_estimate), 30),
+                ("Not charging".into(), String::new())
+            );
+        }
+    }
+
+    #[test]
+    fn both_histories_keep_three_distinct_state_colors() {
+        let samples: Vec<_> = [
+            ("Discharging", 8.0, 60.0),
+            ("Charging", 24.0, 70.0),
+            ("Full", 0.0, 100.0),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, power, percent))| {
+            let mut battery = reading(power);
+            battery.status = status.into();
+            battery.capacity_percent = Some(percent);
+            Sample {
+                time: test_time(index as i64),
+                interval_secs: 1,
+                reading: battery,
+            }
+        })
+        .collect();
+        for graph in [Graph::Power, Graph::Charge] {
+            let segments = graph_segments(samples.iter(), test_time(2).timestamp, 60, graph, 80);
+            assert_eq!(
+                segments.iter().map(|s| s.color).collect::<Vec<_>>(),
+                [ORANGE, BLUE, GREEN]
+            );
+            assert!(segments.iter().all(|s| s.points.len() == 1));
+        }
     }
 
     #[test]
@@ -1429,7 +1594,7 @@ mod tests {
         let segments = graph_segments(samples.iter(), test_time(5).timestamp, 60, Graph::Power, 80);
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].color, ORANGE);
-        assert_eq!(segments[1].color, GREEN);
+        assert_eq!(segments[1].color, BLUE);
         assert_eq!(segments[0].points.len(), 3);
         assert_eq!(segments[1].points.len(), 3);
         assert!(
@@ -1454,7 +1619,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         for (second, (status, expected)) in [
             ("Discharging", ORANGE),
-            ("Charging", GREEN),
+            ("Charging", BLUE),
             ("Full", GREEN),
             ("Not charging", SECONDARY),
             ("Unknown", MUTED),
@@ -1474,20 +1639,24 @@ mod tests {
                 .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            assert_eq!(buffer[(0, 6)].fg, expected);
+            assert_eq!(buffer[(0, 5)].fg, expected);
             assert_eq!(buffer[(137, 39)].fg, TEXT);
-            let cards = metric_areas(Rect::new(0, 0, 140, 5), false);
-            assert_eq!(buffer[(cards[0].x + 1, 1)].fg, TEXT);
-            assert_eq!(buffer[(cards[1].x + 1, 1)].fg, expected);
-            assert_eq!(buffer[(cards[1].x + 2 + status.len() as u16, 1)].fg, TEXT);
-            assert_eq!(buffer[(cards[2].x + 1, 1)].fg, TEXT);
-            assert_eq!(buffer[(cards[1].x + 1, 2)].fg, SECONDARY);
+            let cards = metric_areas(Rect::new(0, 0, 140, 4), false);
+            assert_eq!(buffer[(cards[3].x + 1, 1)].fg, TEXT);
+            assert_eq!(buffer[(cards[1].x + 1, 1)].fg, RED);
+            assert_eq!(buffer[(cards[0].x + 1, 1)].fg, expected);
+            assert_eq!(buffer[(cards[0].x + 2 + status.len() as u16, 1)].fg, TEXT);
+            assert_eq!(
+                buffer[(cards[2].x + 1, 1)].fg,
+                if status == "Full" { GREEN } else { TEXT }
+            );
+            assert_eq!(buffer[(cards[0].x + 1, 2)].fg, SECONDARY);
             assert_eq!(buffer[(0, 39)].fg, TEXT);
             assert!(
                 buffer
                     .content
                     .iter()
-                    .any(|cell| cell.symbol() == "█" && cell.fg == RED)
+                    .any(|cell| cell.symbol() == "█" && cell.fg == expected)
             );
             assert!(buffer.content.iter().any(|cell| cell.modifier.contains(Modifier::UNDERLINED) && cell.fg == expected));
             assert!(text(&terminal).contains(if status == "Not charging" {
@@ -1496,7 +1665,7 @@ mod tests {
                 "12.0 W"
             }));
             if status == "Not charging" {
-                assert!(text(&terminal).contains("Paused"));
+                assert!(text(&terminal).contains("Not charging"));
             }
             assert!(!text(&terminal).contains("-12.0 W"));
         }
@@ -1525,7 +1694,7 @@ mod tests {
                 .draw(|frame| draw(frame, &monitor, &view, Path::new("missing.db")))
                 .unwrap();
             let buffer = terminal.backend().buffer();
-            let selector_row = if width < 72 { 9 } else { 6 };
+            let selector_row = if width < 72 { 9 } else { 5 };
             let line = (0..width)
                 .map(|x| buffer[(x, selector_row)].symbol())
                 .collect::<String>();
@@ -1547,12 +1716,13 @@ mod tests {
     }
 
     #[test]
-    fn charge_history_is_monochrome_with_only_the_current_endpoint_accented() {
+    fn charge_history_and_its_endpoint_share_the_power_state_color() {
         let dir = tempfile::tempdir().unwrap();
         let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
         for second in 0..=10 {
             let mut current = reading(10.0);
-            current.status = "Charging".into();
+            current.status = "Discharging".into();
+            current.capacity_percent = Some(85.0);
             monitor.remember_live(test_time(second), vec![current]);
         }
         let segments = graph_segments(
@@ -1562,7 +1732,7 @@ mod tests {
             Graph::Charge,
             100,
         );
-        assert!(segments.iter().all(|segment| segment.color == TEXT));
+        assert!(segments.iter().all(|segment| segment.color == ORANGE));
         let mut terminal = Terminal::new(TestBackend::new(100, 15)).unwrap();
         terminal
             .draw(|frame| {
@@ -1581,10 +1751,10 @@ mod tests {
             buffer
                 .content
                 .iter()
-                .any(|cell| cell.symbol() == "•" && cell.fg == GREEN)
+                .any(|cell| cell.symbol() == "•" && cell.fg == ORANGE)
         );
         assert!(buffer.content.iter().any(|cell| {
-            cell.fg == TEXT
+            cell.fg == ORANGE
                 && cell
                     .symbol()
                     .chars()
@@ -1604,22 +1774,122 @@ mod tests {
             })
             .unwrap();
         assert!(
-            !terminal
+            terminal
                 .backend()
                 .buffer()
                 .content
                 .iter()
-                .any(|cell| cell.symbol() == "•" && cell.fg == GREEN)
+                .any(|cell| cell.symbol() == "•" && cell.fg == ORANGE)
         );
+        assert!(!text(&terminal).contains("auto scale"));
     }
 
     #[test]
-    fn gauge_follows_state_but_primary_values_stay_white_and_warnings_stay_distinct() {
+    fn charge_history_keeps_original_state_colors_instead_of_remaining_level_colors() {
+        let samples: Vec<_> = [
+            ("Discharging", 95.0),
+            ("Discharging", 85.0),
+            ("Charging", 30.0),
+            ("Charging", 40.0),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (status, percent))| {
+            let mut battery = reading(12.0);
+            battery.status = status.into();
+            battery.capacity_percent = Some(percent);
+            Sample {
+                time: test_time(index as i64 * 30),
+                interval_secs: 30,
+                reading: battery,
+            }
+        })
+        .collect();
+        let segments = graph_segments(
+            samples.iter(),
+            test_time(90).timestamp,
+            120,
+            Graph::Charge,
+            100,
+        );
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].color, ORANGE);
+        assert_eq!(segments[1].color, BLUE);
+        assert_eq!(segments[0].points.len(), 2);
+        assert_eq!(segments[1].points.len(), 2);
+    }
+
+    #[test]
+    fn charge_history_does_not_bridge_missing_or_invalid_remaining_levels() {
+        for invalid in [None, Some(-1.0), Some(101.0), Some(f64::NAN)] {
+            let samples: Vec<_> = [Some(85.0), invalid, Some(83.0)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, percent)| {
+                    let mut battery = reading(12.0);
+                    battery.capacity_percent = percent;
+                    Sample {
+                        time: test_time(index as i64 * 30),
+                        interval_secs: 30,
+                        reading: battery,
+                    }
+                })
+                .collect();
+            let segments = graph_segments(
+                samples.iter(),
+                test_time(60).timestamp,
+                60,
+                Graph::Charge,
+                100,
+            );
+            assert_eq!(segments.len(), 2);
+            assert!(
+                segments
+                    .iter()
+                    .all(|s| s.color == ORANGE && s.points.len() == 1)
+            );
+        }
+    }
+
+    #[test]
+    fn recording_is_hidden_in_details_but_problems_remain_in_help() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
+        monitor.recorded = Some(Snapshot {
+            frame_id: 1,
+            time: test_time(0),
+            interval_secs: 30,
+            batteries: vec![reading(12.0)],
+        });
+        monitor.remember_live(test_time(100), vec![reading(12.0)]);
+        assert_eq!(recorder_warning(&monitor), Some("Recorder stale"));
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
+            .unwrap();
+        for removed in ["Recording", "Last saved", "Every 30s", "Recorder stale"] {
+            assert!(!text(&terminal).contains(removed));
+        }
+        let view = View {
+            help: true,
+            ..Default::default()
+        };
+        terminal
+            .draw(|frame| draw(frame, &monitor, &view, Path::new("missing.db")))
+            .unwrap();
+        assert!(text(&terminal).contains("Recorder stale"));
+        monitor.live_enabled = false;
+        assert_eq!(recorder_warning(&monitor), None);
+    }
+
+    #[test]
+    fn charge_gauge_follows_state_and_all_summary_cards_have_two_content_rows() {
         let dir = tempfile::tempdir().unwrap();
         let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
         let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
-        for (status, expected) in [("Charging", GREEN), ("Discharging", ORANGE)] {
-            for (percent, warning) in [(50.0, None), (25.0, Some(YELLOW)), (10.0, Some(RED))] {
+        for status in ["Charging", "Discharging", "Full", "Not charging", "Unknown"] {
+            for percent in [10.0, 25.0, 50.0, 85.0, 100.0] {
+                let expected = status_color(status);
                 let mut current = reading(12.0);
                 current.status = status.into();
                 current.capacity_percent = Some(percent);
@@ -1632,10 +1902,23 @@ mod tests {
                     buffer
                         .content
                         .iter()
-                        .any(|cell| cell.symbol() == "█" && cell.fg == warning.unwrap_or(expected))
+                        .any(|cell| cell.symbol() == "█" && cell.fg == expected)
                 );
-                let cards = metric_areas(Rect::new(0, 0, 100, 5), false);
-                assert_eq!(buffer[(cards[3].x + 1, 1)].fg, warning.unwrap_or(TEXT));
+                let cards = metric_areas(Rect::new(0, 0, 100, 4), false);
+                for card in &cards {
+                    assert_eq!(buffer[(card.x, 3)].symbol(), "╰");
+                }
+                assert_eq!(
+                    buffer[(cards[1].x + 1, 1)].fg,
+                    if percent < 15.0 {
+                        RED
+                    } else if percent < 30.0 {
+                        YELLOW
+                    } else {
+                        TEXT
+                    }
+                );
+                assert_eq!(buffer[(cards[1].x + 1, 2)].fg, expected);
             }
         }
     }
@@ -1658,7 +1941,8 @@ mod tests {
                 .unwrap();
             assert!(text(&terminal).contains("Details · d / Esc to close"));
             assert!(text(&terminal).contains("55.0 Wh"));
-            assert!(text(&terminal).contains("Recording"));
+            assert!(!text(&terminal).contains("Recording"));
+            assert!(!text(&terminal).contains("Last saved"));
             view.details = Some(false);
             terminal
                 .draw(|frame| draw(frame, &monitor, &view, Path::new("missing.db")))
@@ -1693,7 +1977,7 @@ mod tests {
             } else {
                 width - 1
             };
-            assert_eq!(terminal.backend().buffer()[(right, 6)].symbol(), "╮");
+            assert_eq!(terminal.backend().buffer()[(right, 5)].symbol(), "╮");
         }
     }
 
@@ -1708,11 +1992,11 @@ mod tests {
             .unwrap();
         let cards = metric_areas(Rect::new(0, 0, 140, 5), false);
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(cards[1].x + 1, 2)].fg, SECONDARY);
         assert_eq!(buffer[(cards[0].x + 1, 2)].fg, SECONDARY);
+        assert_eq!(buffer[(cards[3].x + 1, 2)].fg, SECONDARY);
         assert_eq!(buffer[(0, 39)].fg, TEXT);
         assert_eq!(buffer[(4, 39)].fg, SECONDARY);
-        assert_eq!(buffer[(cards[3].x + 2, 7)].fg, SECONDARY);
+        assert_eq!(buffer[(cards[3].x + 2, 6)].fg, SECONDARY);
     }
 
     #[test]
@@ -1814,7 +2098,7 @@ mod tests {
                 let compact = width < 72;
                 let cards =
                     metric_areas(Rect::new(0, 0, width, if compact { 8 } else { 5 }), compact);
-                let card = cards[1];
+                let card = cards[0];
                 let mut terminal = Terminal::new(TestBackend::new(width, 32)).unwrap();
                 terminal
                     .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
@@ -1832,10 +2116,54 @@ mod tests {
                 );
                 assert!(first.starts_with("Discharging ") || first.starts_with("Disch. "));
                 assert_eq!(row(card.y + 2).trim(), "Battery · BAT0");
-                if !compact {
-                    assert!(row(card.y + 3).trim().is_empty());
-                }
+                assert_eq!(buffer[(card.x, card.y + 3)].symbol(), "╰");
             }
+        }
+    }
+
+    #[test]
+    fn details_identify_live_controls_and_do_not_project_them_onto_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut monitor = Monitor::new(&dir.path().join("missing.db"), dir.path(), true).unwrap();
+        monitor.remember_live(test_time(0), vec![reading(10.0)]);
+        monitor.power_settings = crate::power::PowerSettings {
+            platform: Some("balanced".into()),
+            driver: Some("intel_pstate".into()),
+            pstate: Some("active".into()),
+            epp: Some("balance_performance".into()),
+            governor: Some("powersave".into()),
+        };
+        for (width, height) in [(120, 24), (140, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
+                .unwrap();
+            for value in [
+                "Platform balanced",
+                "Driver   intel_pstate",
+                "EPP      balance perf.",
+                "Pstate   active",
+            ] {
+                assert!(text(&terminal).contains(value), "{width}x{height}: {value}");
+            }
+            if height == 40 {
+                assert!(text(&terminal).contains("Governor powersave"));
+            }
+            monitor.live_enabled = false;
+            terminal
+                .draw(|frame| draw(frame, &monitor, &View::default(), Path::new("missing.db")))
+                .unwrap();
+            assert!(text(&terminal).contains("Power settings not saved"));
+            for value in [
+                "balanced",
+                "intel_pstate",
+                "balance perf.",
+                "powersave",
+                "active",
+            ] {
+                assert!(!text(&terminal).contains(value));
+            }
+            monitor.live_enabled = true;
         }
     }
 

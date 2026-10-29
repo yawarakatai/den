@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use crate::{
     battery,
     model::{BatteryReading, Sample, SampleTime, Snapshot, unix_now},
+    power::{self, PowerSettings},
     predict::{Estimate, time_to_empty, time_to_full},
     storage::Store,
     usage::{HOUR, UsageHistory},
@@ -26,6 +27,7 @@ pub struct Monitor {
     pub history: Vec<Sample>,
     pub usage: Option<UsageHistory>,
     pub usage_error: Option<String>,
+    pub power_settings: PowerSettings,
     pub selected: Option<String>,
     pub live_enabled: bool,
     pub live_error: Option<String>,
@@ -38,6 +40,7 @@ pub struct Monitor {
     boot_id: String,
     store: Option<Store>,
     history_refreshed: Option<Instant>,
+    power_refreshed: Option<Instant>,
     history_key: Option<(i64, String, i64)>,
     usage_key: Option<(i64, String, i64)>,
 }
@@ -57,6 +60,7 @@ impl Monitor {
             history: Vec::new(),
             usage: None,
             usage_error: None,
+            power_settings: PowerSettings::default(),
             selected: None,
             live_enabled,
             live_error: None,
@@ -69,6 +73,7 @@ impl Monitor {
             boot_id,
             store: None,
             history_refreshed: None,
+            power_refreshed: None,
             history_key: None,
             usage_key: None,
         })
@@ -78,6 +83,15 @@ impl Monitor {
         self.now = unix_now()?;
         if self.live_enabled {
             self.poll_live(SampleTime::now(&self.boot_id)?);
+            if self
+                .power_refreshed
+                .is_none_or(|at| at.elapsed() >= HISTORY_REFRESH)
+            {
+                self.power_settings = power::sys_root(&self.sysfs)
+                    .map(PowerSettings::collect)
+                    .unwrap_or_default();
+                self.power_refreshed = Some(Instant::now());
+            }
         }
         if self
             .history_refreshed
@@ -581,6 +595,35 @@ mod tests {
     }
 
     #[test]
+    fn power_settings_refresh_slowly_without_history_and_do_not_survive_read_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let sys = dir.path().join("sys");
+        let supplies = sys.join("class/power_supply");
+        std::fs::create_dir_all(&supplies).unwrap();
+        let profile = sys.join("firmware/acpi/platform_profile");
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "balanced").unwrap();
+        let database = dir.path().join("missing.db");
+        let mut monitor = Monitor::new(&database, &supplies, true).unwrap();
+        monitor.tick(60).unwrap();
+        assert_eq!(monitor.power_settings.platform.as_deref(), Some("balanced"));
+        std::fs::write(&profile, "performance").unwrap();
+        monitor.tick(60).unwrap();
+        assert_eq!(monitor.power_settings.platform.as_deref(), Some("balanced"));
+        monitor.power_refreshed = Some(Instant::now() - HISTORY_REFRESH);
+        monitor.tick(60).unwrap();
+        assert_eq!(
+            monitor.power_settings.platform.as_deref(),
+            Some("performance")
+        );
+        std::fs::remove_file(profile).unwrap();
+        monitor.power_refreshed = Some(Instant::now() - HISTORY_REFRESH);
+        monitor.tick(60).unwrap();
+        assert_eq!(monitor.power_settings.platform, None);
+        assert!(!database.exists());
+    }
+
+    #[test]
     fn history_only_never_reads_live_sensors_and_anchors_at_the_recording() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("history.db");
@@ -588,11 +631,16 @@ mod tests {
         writer
             .record(&test_time(0), 30, &[reading(8.0, "Discharging")])
             .unwrap();
-        let mut monitor = Monitor::new(&path, &dir.path().join("missing-sysfs"), false).unwrap();
+        let sys = dir.path().join("sys");
+        std::fs::create_dir_all(sys.join("firmware/acpi")).unwrap();
+        std::fs::write(sys.join("firmware/acpi/platform_profile"), "performance").unwrap();
+        let mut monitor = Monitor::new(&path, &sys.join("class/power_supply"), false).unwrap();
         monitor.tick(60).unwrap();
         assert_eq!(monitor.plot_end(), test_time(0).timestamp);
         assert_eq!(monitor.samples().count(), 1);
         assert!(monitor.live_error.is_none());
         assert!(monitor.source_stale());
+        assert_eq!(monitor.power_settings, PowerSettings::default());
+        assert!(monitor.power_refreshed.is_none());
     }
 }

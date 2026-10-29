@@ -3,8 +3,10 @@ compile_error!("den supports Linux only");
 
 mod battery;
 mod daemon;
+mod eta;
 mod model;
 mod monitor;
+mod power;
 mod predict;
 mod storage;
 mod tui;
