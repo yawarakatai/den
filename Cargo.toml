@@ -1,0 +1,17 @@
+[package]
+name = "den"
+version = "0.1.0"
+edition = "2024"
+
+description = "A lightweight Linux battery recorder and terminal viewer"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+rusqlite = { version = "0.37", features = ["bundled"] }
+rustix = { version = "1", features = ["fs", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
