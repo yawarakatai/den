@@ -1,4 +1,9 @@
-{ lib, rustPlatform }:
+{
+  lib,
+  rustPlatform,
+  pkg-config,
+  sqlite,
+}:
 
 rustPlatform.buildRustPackage {
   pname = "den";
@@ -17,6 +22,11 @@ rustPlatform.buildRustPackage {
   };
   cargoLock.lockFile = ../Cargo.lock;
   strictDeps = true;
+
+  # nixpkgs' cargoUseSystemLibs makes libsqlite3-sys link the system SQLite
+  # even with rusqlite's `bundled` feature.
+  nativeBuildInputs = [ pkg-config ];
+  buildInputs = [ sqlite ];
 
   meta = {
     description = "A lightweight Linux battery recorder and terminal viewer";
